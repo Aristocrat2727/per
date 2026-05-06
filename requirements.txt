@@ -1,0 +1,5 @@
+telethon
+aiogram==2.25.1
+flask
+nest-asyncio
+pytz
