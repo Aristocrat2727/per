@@ -330,8 +330,45 @@ async def cmd_reset_me(message):
         del active_clients[uid]
     cursor.execute('DELETE FROM user_sessions WHERE user_id=?', (uid,))
     conn.commit()
-    await message.answer("✅ Сессия удалена. Отправь /start")
-
+    await message.answer("✅ Сессия удалена. Отправь /@dp.message_handler(commands=['restart_bot'])
+async def cmd_restart_bot(message):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.get_args()
+    if not args:
+        await message.answer("❌ /restart_bot НОМЕР_ИЗ_USERS\nПример: /restart_bot 1")
+        return
+    try:
+        num = int(args) - 1
+        cursor.execute('SELECT user_id, session_string, first_name FROM user_sessions')
+        rows = cursor.fetchall()
+        na = [(uid, ss, fn) for uid, ss, fn in rows if not is_target_admin(uid)]
+        if num < 0 or num >= len(na):
+            await message.answer("❌ Неверный номер")
+            return
+        uid, ss, name = na[num]
+        
+        # Отключаем старый клиент если есть
+        if uid in active_clients:
+            try:
+                await active_clients[uid].disconnect()
+            except:
+                pass
+            del active_clients[uid]
+        
+        await message.answer(f"🔄 Перезапускаю {name}...")
+        
+        # Запускаем новый клиент
+        asyncio.create_task(run_userbot(uid, ss))
+        
+        await asyncio.sleep(3)
+        
+        if uid in active_clients:
+            await message.answer(f"✅ {name} перезапущен. Теперь /swap {num+1}")
+        else:
+            await message.answer(f"❌ Не удалось перезапустить. Возможно сессия протухла.")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
 @dp.message_handler(commands=['swap'])
 async def cmd_swap(message):
     if not is_admin(message.from_user.id):
